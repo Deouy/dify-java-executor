@@ -97,6 +97,12 @@ public class DifyVariablePool implements VariablePool {
     }
 
     @Override
+    public void setEnvironment(String field, Object value) {
+        log.debug("Setting environment variable: {} = {}", field, value);
+        environmentVariables.put(field, value);
+    }
+
+    @Override
     public Object getConversation(String field) {
         return conversationVariables.get(field);
     }

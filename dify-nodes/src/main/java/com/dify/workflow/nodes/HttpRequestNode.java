@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -127,39 +128,22 @@ public class HttpRequestNode extends AbstractDifyNode {
     }
 
     /**
-     * 解析 data.headers():支持 Map (key→value) 和 String ("K: V\nK: V") 两种格式。
-     * YAML 中 headers 字段有时是 Map,有时是字符串(老版本 Dify 导出格式),两种都要兼容。
+     * 解析 data.headers() 为 OkHttp headers。YAML 中 headers 是 String("K: V\nK: V") 格式,
+     * 按行解析为 K-V 对。空字符串或 null 表示未配置。
      */
     private void applyHeaders(NodeExecutionContext context, Headers.Builder builder) {
-        // 优先从 additionalProperties 读 headers(YAML 中类型不固定时 FastJSON2 把它塞这里)
-        Object raw = null;
-        if (data.additionalProperties() != null) {
-            raw = data.additionalProperties().get("headers");
+        String headerStr = data.headers();
+        if (headerStr == null || headerStr.trim().isEmpty()) {
+            return;
         }
-        if (raw == null) {
-            raw = data.headers();
-        }
-
-        if (raw instanceof Map) {
-            for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
-                if (entry.getKey() != null && entry.getValue() != null) {
-                    String value = resolveVariables(context, String.valueOf(entry.getValue()));
-                    builder.add(String.valueOf(entry.getKey()), value);
-                }
-            }
-        } else if (raw instanceof String) {
-            String headerStr = resolveVariables(context, (String) raw);
-            // 按行解析 "Key1: Value1\nKey2: Value2"
-            if (headerStr != null && !headerStr.trim().isEmpty()) {
-                for (String line : headerStr.split("\\r?\\n")) {
-                    int idx = line.indexOf(':');
-                    if (idx > 0) {
-                        String key = line.substring(0, idx).trim();
-                        String value = line.substring(idx + 1).trim();
-                        if (!key.isEmpty()) {
-                            builder.add(key, value);
-                        }
-                    }
+        headerStr = resolveVariables(context, headerStr);
+        for (String line : headerStr.split("\\r?\\n")) {
+            int idx = line.indexOf(':');
+            if (idx > 0) {
+                String key = line.substring(0, idx).trim();
+                String value = line.substring(idx + 1).trim();
+                if (!key.isEmpty()) {
+                    builder.add(key, value);
                 }
             }
         }
@@ -194,38 +178,22 @@ public class HttpRequestNode extends AbstractDifyNode {
 
     /**
      * 解析 data.params() 为 URL query string 并追加。
-     * params 字段可能是 Map<String,String>、String("k1=v1&k2=v2")、或额外属性中的字符串。
+     * params 字段为 String("k1=v1&k2=v2") 格式,按 & 和 = 拆分。
      */
-    private String appendQueryString(NodeExecutionContext context, String url) {
-        Object raw = null;
-        if (data.additionalProperties() != null) {
-            raw = data.additionalProperties().get("params");
-        }
-        if (raw == null) {
-            raw = data.params();
-        }
-        if (raw == null) {
+    String appendQueryString(NodeExecutionContext context, String url) {
+        String paramStr = data.params();
+        if (paramStr == null || paramStr.trim().isEmpty()) {
             return url;
         }
+        paramStr = resolveVariables(context, paramStr);
 
         Map<String, String> queryMap = new LinkedHashMap<>();
-        if (raw instanceof Map) {
-            for (Map.Entry<?, ?> entry : ((Map<?, ?>) raw).entrySet()) {
-                if (entry.getKey() != null && entry.getValue() != null) {
-                    queryMap.put(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
-                }
-            }
-        } else if (raw instanceof String) {
-            String paramStr = resolveVariables(context, (String) raw);
-            if (paramStr != null && !paramStr.trim().isEmpty()) {
-                for (String pair : paramStr.split("&")) {
-                    int idx = pair.indexOf('=');
-                    if (idx > 0) {
-                        queryMap.put(pair.substring(0, idx), pair.substring(idx + 1));
-                    } else if (!pair.isEmpty()) {
-                        queryMap.put(pair, "");
-                    }
-                }
+        for (String pair : paramStr.split("&")) {
+            int idx = pair.indexOf('=');
+            if (idx > 0) {
+                queryMap.put(pair.substring(0, idx), pair.substring(idx + 1));
+            } else if (!pair.isEmpty()) {
+                queryMap.put(pair, "");
             }
         }
         if (queryMap.isEmpty()) {
@@ -258,7 +226,7 @@ public class HttpRequestNode extends AbstractDifyNode {
      *   <li>binary → application/octet-stream (data 字段 base64 字符串)</li>
      * </ul>
      */
-    private RequestBody buildRequestBody(NodeExecutionContext context) {
+    RequestBody buildRequestBody(NodeExecutionContext context) {
         DifyHttpBody httpBody = data.body();
         if (httpBody == null) {
             return null;
@@ -269,43 +237,84 @@ public class HttpRequestNode extends AbstractDifyNode {
         }
 
         if ("json".equalsIgnoreCase(type)) {
-            String bodyData = resolveVariables(context, httpBody.data());
+            String bodyData = resolveVariables(context, httpBody.dataAsString());
             return RequestBody.create(JSON, bodyData != null ? bodyData : "");
         }
         if ("text".equalsIgnoreCase(type)) {
-            String bodyData = resolveVariables(context, httpBody.data());
+            String bodyData = resolveVariables(context, httpBody.dataAsString());
             return RequestBody.create(MediaType.parse("text/plain; charset=utf-8"),
                 bodyData != null ? bodyData : "");
         }
-        if ("x-www-form-urlencoded".equalsIgnoreCase(type)) {
-            FormBody.Builder fb = new FormBody.Builder();
-            Map<String, String> form = httpBody.formData();
-            if (form != null) {
-                for (Map.Entry<String, String> entry : form.entrySet()) {
-                    fb.add(entry.getKey(), resolveVariables(context, entry.getValue()));
+        if ("x-www-form-urlencoded".equalsIgnoreCase(type)
+                || "form-data".equalsIgnoreCase(type)
+                || "multipart/form-data".equalsIgnoreCase(type)) {
+            // 关键修复:真实 Dify 导出 form-data 时,data 字段是 List<Map> 形式,
+            // 每项含 id / key / type / value;少数老格式用 form_data Map 字段。
+            // 优先用 data 列表,兼容老 Map 字段。
+            List<Map<String, Object>> items = httpBody.formDataItems();
+            Map<String, String> legacyMap = httpBody.formData();
+
+            boolean isMultipart = !"x-www-form-urlencoded".equalsIgnoreCase(type);
+            if (isMultipart) {
+                MultipartBody.Builder mb = new MultipartBody.Builder().setType(MultipartBody.FORM);
+                if (items != null) {
+                    for (Map<String, Object> item : items) {
+                        addFormField(context, mb, item);
+                    }
+                } else if (legacyMap != null) {
+                    for (Map.Entry<String, String> e : legacyMap.entrySet()) {
+                        mb.addFormDataPart(e.getKey(), resolveVariables(context, e.getValue()));
+                    }
                 }
-            }
-            return fb.build();
-        }
-        if ("form-data".equalsIgnoreCase(type) || "multipart/form-data".equalsIgnoreCase(type)) {
-            MultipartBody.Builder mb = new MultipartBody.Builder().setType(MultipartBody.FORM);
-            Map<String, String> form = httpBody.formData();
-            if (form != null) {
-                for (Map.Entry<String, String> entry : form.entrySet()) {
-                    mb.addFormDataPart(entry.getKey(), resolveVariables(context, entry.getValue()));
+                return mb.build();
+            } else {
+                FormBody.Builder fb = new FormBody.Builder();
+                if (items != null) {
+                    for (Map<String, Object> item : items) {
+                        addFormField(context, fb, item);
+                    }
+                } else if (legacyMap != null) {
+                    for (Map.Entry<String, String> e : legacyMap.entrySet()) {
+                        fb.add(e.getKey(), resolveVariables(context, e.getValue()));
+                    }
                 }
+                return fb.build();
             }
-            return mb.build();
         }
         if ("binary".equalsIgnoreCase(type)) {
             // binary 在 Dify 中是 DifyHttpBinary,这里取 data 字段作 base64 raw body 占位
-            String bodyData = httpBody.data();
+            String bodyData = httpBody.dataAsString();
             return RequestBody.create(MediaType.parse("application/octet-stream"),
                 bodyData != null ? bodyData : "");
         }
         // 兜底:当作 json 处理
-        String bodyData = resolveVariables(context, httpBody.data());
+        String bodyData = resolveVariables(context, httpBody.dataAsString());
         return RequestBody.create(JSON, bodyData != null ? bodyData : "");
+    }
+
+    /**
+     * 从 form-data 列表项中读取 key 和 value,追加到 FormBody 或 MultipartBody。
+     * 列表项字段:id(忽略,前端 UI 标识) / key(参数名) / type(忽略,目前只支持 text)
+     * / value(参数值,可能含 {{#var#}} 变量占位符)。
+     * type==file 的情况暂不处理(本仓库范围外,留待 P1)。
+     */
+    private void addFormField(NodeExecutionContext context, Object builder, Map<String, Object> item) {
+        if (item == null) {
+            return;
+        }
+        Object keyObj = item.get("key");
+        Object valueObj = item.get("value");
+        if (keyObj == null) {
+            return;
+        }
+        String key = String.valueOf(keyObj);
+        String raw = valueObj == null ? "" : String.valueOf(valueObj);
+        String resolved = resolveVariables(context, raw);
+        if (builder instanceof FormBody.Builder) {
+            ((FormBody.Builder) builder).add(key, resolved);
+        } else if (builder instanceof MultipartBody.Builder) {
+            ((MultipartBody.Builder) builder).addFormDataPart(key, resolved);
+        }
     }
 
     /**

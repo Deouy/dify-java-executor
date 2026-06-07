@@ -57,14 +57,17 @@ public final class DifyNodeData {
     private final List<DifyVariable> outputVariables;
 
     // HTTP Request node fields
+    // 关键修复:真实 Dify 导出的 http-request 节点,headers/params 字段为 String(可能含 {{#var#}} 变量
+    //   占位符或多行 "K: V" 格式),少数老格式为 Map<String,String>。FastJSON2 在字段类型与 JSON 值类型
+    //   不匹配时会抛错,因此这里声明为 Object,由消费侧 HttpRequestNode 用 instanceof 分支处理两种格式。
     @JSONField(name = "method")
     private final String method;
     @JSONField(name = "url")
     private final String url;
     @JSONField(name = "headers")
-    private final Map<String, String> headers;
+    private final String headers;
     @JSONField(name = "params")
-    private final Map<String, String> params;
+    private final String params;
     @JSONField(name = "body")
     private final DifyHttpBody body;
     @JSONField(name = "authorization")
@@ -181,7 +184,7 @@ public final class DifyNodeData {
                         DifyVisionConfig vision, DifyMemoryConfig memory, DifyContextConfig context,
                         DifyStructuredOutputConfig structuredOutput, DifyRetryConfig retryConfig,
                         String code, String language, List<DifyVariable> inputVariables, List<DifyVariable> outputVariables,
-                        String method, String url, Map<String, String> headers, Map<String, String> params,
+                        String method, String url, String headers, String params,
                         DifyHttpBody body, DifyAuthorization authorization,
                         List<DifyCase> cases, String outputType, Object outputs, String answer,
                         Integer parallelNums, Integer maxConcurrency,
@@ -285,8 +288,8 @@ public final class DifyNodeData {
     public List<DifyVariable> outputVariables() { return outputVariables; }
     public String method() { return method; }
     public String url() { return url; }
-    public Map<String, String> headers() { return headers; }
-    public Map<String, String> params() { return params; }
+    public String headers() { return headers; }
+    public String params() { return params; }
     public DifyHttpBody body() { return body; }
     public DifyAuthorization authorization() { return authorization; }
     public List<DifyCase> cases() { return cases; }
@@ -377,8 +380,8 @@ public final class DifyNodeData {
     public List<DifyVariable> getOutputVariables() { return outputVariables; }
     public String getMethod() { return method; }
     public String getUrl() { return url; }
-    public Map<String, String> getHeaders() { return headers; }
-    public Map<String, String> getParams() { return params; }
+    public String getHeaders() { return headers; }
+    public String getParams() { return params; }
     public DifyHttpBody getBody() { return body; }
     public DifyAuthorization getAuthorization() { return authorization; }
     public List<DifyCase> getCases() { return cases; }
@@ -546,8 +549,8 @@ public final class DifyNodeData {
         private List<DifyVariable> outputVariables;
         private String method;
         private String url;
-        private Map<String, String> headers;
-        private Map<String, String> params;
+        private String headers;
+        private String params;
         private DifyHttpBody body;
         private DifyAuthorization authorization;
         private List<DifyCase> cases;
@@ -608,8 +611,8 @@ public final class DifyNodeData {
         public Builder outputVariables(List<DifyVariable> outputVariables) { this.outputVariables = outputVariables; return this; }
         public Builder method(String method) { this.method = method; return this; }
         public Builder url(String url) { this.url = url; return this; }
-        public Builder headers(Map<String, String> headers) { this.headers = headers; return this; }
-        public Builder params(Map<String, String> params) { this.params = params; return this; }
+        public Builder headers(String headers) { this.headers = headers; return this; }
+        public Builder params(String params) { this.params = params; return this; }
         public Builder body(DifyHttpBody body) { this.body = body; return this; }
         public Builder authorization(DifyAuthorization authorization) { this.authorization = authorization; return this; }
         public Builder cases(List<DifyCase> cases) { this.cases = cases; return this; }

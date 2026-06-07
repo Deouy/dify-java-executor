@@ -46,6 +46,13 @@ public interface VariablePool {
     Object getEnvironment(String field);
 
     /**
+     * Set an environment variable.
+     * Mirrors setSystem/setConversation symmetry. Used by DifyWorkflowExecutor
+     * when initializing bootstrap env vars from workflow YAML.
+     */
+    void setEnvironment(String field, Object value);
+
+    /**
      * Get a conversation variable.
      */
     Object getConversation(String field);

@@ -11,6 +11,7 @@ import com.dify.workflow.model.StreamDelta;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -297,6 +298,39 @@ public class LlmProviderFactory implements LlmService {
                 return new CustomOpenAiProvider(config).call(request);
             });
 
+            // 注册流式 executor:callStream 路径走 AbstractLlmProvider 的真 SSE 实现(OkHttp EventSource),
+            //   不再回退到 callStream() 行 169-181 的"同步 call + 切 5 段"假流。
+            // try/catch IOException 是必需的:AbstractLlmProvider.callStream 声明 throws IOException,
+            //   而 BiConsumer.accept 不允许 checked exception,wrap 成 RuntimeException 对齐
+            //   LlmNode.doExecute 行 223-225 的现有做法。
+            streamExecutors.put("openai", (req, onDelta) -> {
+                LlmProviderConfig config = configs.get("openai");
+                if (config == null) throw new IllegalArgumentException("OpenAI config not found");
+                try { new OpenAiProvider(config).callStream(req, onDelta); }
+                catch (IOException e) { throw new RuntimeException("LLM stream call failed for openai: " + e.getMessage(), e); }
+            });
+
+            streamExecutors.put("deepseek", (req, onDelta) -> {
+                LlmProviderConfig config = configs.get("deepseek");
+                if (config == null) throw new IllegalArgumentException("DeepSeek config not found");
+                try { new DeepSeekProvider(config).callStream(req, onDelta); }
+                catch (IOException e) { throw new RuntimeException("LLM stream call failed for deepseek: " + e.getMessage(), e); }
+            });
+
+            streamExecutors.put("minimax", (req, onDelta) -> {
+                LlmProviderConfig config = configs.get("minimax");
+                if (config == null) throw new IllegalArgumentException("MiniMax config not found");
+                try { new MiniMaxProvider(config).callStream(req, onDelta); }
+                catch (IOException e) { throw new RuntimeException("LLM stream call failed for minimax: " + e.getMessage(), e); }
+            });
+
+            streamExecutors.put("custom", (req, onDelta) -> {
+                LlmProviderConfig config = configs.get("custom");
+                if (config == null) throw new IllegalArgumentException("Custom config not found");
+                try { new CustomOpenAiProvider(config).callStream(req, onDelta); }
+                catch (IOException e) { throw new RuntimeException("LLM stream call failed for custom: " + e.getMessage(), e); }
+            });
+
             return this;
         }
 
@@ -304,6 +338,9 @@ public class LlmProviderFactory implements LlmService {
             LlmProviderFactory factory = new LlmProviderFactory();
             factory.configs.putAll(configs);
             factory.executors.putAll(executors);
+            // 关键修复:把 streamExecutors 复制到 factory,否则 Builder.streamExecutor(...) 公共 API
+            //   静默失效,callStream 永远掉进行 169-181 的假流兜底。
+            factory.streamExecutors.putAll(streamExecutors);
             return factory;
         }
     }

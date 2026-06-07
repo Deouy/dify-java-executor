@@ -219,12 +219,16 @@ public class DifyWorkflowExecutor {
     private void initializeContextVariables(DifyWorkflowContext context) {
         DifyWorkflow workflow = dslModel.workflow();
 
-        // 环境变量 → 以 "env" 为 nodeId 存入变量池
+        // 环境变量 → 走 environmentVariables 专用通道(与 conversation 通道对称)
+        // 关键修复:必须用 VariablePool.setEnvironment,不能走通用 setVariable。
+        // 通用 setVariable 会写到 nodeOutputs["env"],而 AbstractDifyNode.resolveVariables
+        // 的 ENVIRONMENT 分支从 getEnvironment(field) 走 environmentVariables 桶,
+        // 两条路径永不相交,会导致 {{#env.X#}} 字面回显。
         if (workflow.environmentVariables() != null) {
             for (DifyEnvironmentVariable envVar : workflow.environmentVariables()) {
                 String val = envVar.value();
                 if (val != null && !val.isEmpty()) {
-                    context.setVariable("env", envVar.name(), val);
+                    context.getVariablePool().setEnvironment(envVar.name(), val);
                     log.debug("Initialized env variable: {} = {}", envVar.name(), val);
                 }
             }
