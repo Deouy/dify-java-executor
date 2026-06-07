@@ -1,0 +1,28 @@
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.project
+.classpath
+.settings/
+
+# Build
+target/
+*.class
+*.jar
+*.war
+
+# Logs
+*.log
+test-output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Maven
+.mvn/
+mvnw
+mvnw.cmd
