@@ -56,6 +56,9 @@ public class DifyWorkflowContext implements NodeExecutionContext {
     /** 当前工作流实例的 messageId(用于 WorkflowEvent.Chunk.messageId) */
     private final int chunkMessageId = (int) (System.currentTimeMillis() % 1_000_000);
 
+    /** chunk messageId 暴露给协调器,使重写 chunk 与原始 chunk 共用同一消息 ID */
+    public int getChunkMessageId() { return chunkMessageId; }
+
     void setSubGraphRunner(SubGraphRunner runner) {
         this.subGraphRunner = runner;
     }
@@ -81,6 +84,17 @@ public class DifyWorkflowContext implements NodeExecutionContext {
      */
     void setEventListener(com.dify.workflow.model.WorkflowEventListener eventListener) {
         this.eventListener = eventListener;
+        // 同步注入到协调器(若已设置),保证协调器发的重写 chunk 走相同 listener
+        if (responseCoordinator != null) {
+            responseCoordinator.setEventListener(eventListener);
+        }
+    }
+
+    /** 同步 messageId 到协调器,使重写 chunk 与原始 chunk 共用同一消息 ID */
+    public void setChunkMessageId(int messageId) {
+        if (responseCoordinator != null) {
+            responseCoordinator.setChunkMessageId(messageId);
+        }
     }
 
     @Override
@@ -244,23 +258,41 @@ public class DifyWorkflowContext implements NodeExecutionContext {
     }
 
     /**
-     * 发射 LLM 流式输出 chunk 事件给 WorkflowEventListener.onChunk。
-     * 由 LLM/Agent 节点在收到每个 SSE token 时调用,转发给 listener(若已注入)。
+     * 发射 LLM 流式输出 chunk。
+     *
+     * <p>关键修复:不再直发原始 LLM chunk(标签=llmId),统一走 ResponseStreamCoordinator
+     * 重写,最终消费端只看到 answer 节点标签的 chunk。对齐 Dify 原版
+     * {@code graph_engine.response_coordinator.coordinator} 行为。</p>
+     *
+     * <p>若协调器未注入(测试或老路径),走原后备通道直发(selector=null)。</p>
      */
     @Override
     public void emitChunk(String nodeId, String delta) {
         if (eventListener == null) {
             return;  // listener 不关心流式 chunk,默认丢弃
         }
+        if (responseCoordinator != null) {
+            // 走协调器重写路径;协调器内部按 answer 节点 ID 重新 emit
+            responseCoordinator.interceptChunk(nodeId, delta);
+            return;
+        }
+        // 后备通道(无协调器):原样发,selector=null 表示原始 LLM chunk
         try {
             int idx = chunkIndex++;
             com.dify.workflow.model.WorkflowEvent.Chunk event =
-                    new com.dify.workflow.model.WorkflowEvent.Chunk(nodeId, chunkMessageId, delta, idx);
+                    new com.dify.workflow.model.WorkflowEvent.Chunk(nodeId, chunkMessageId, delta, idx, null);
             eventListener.onChunk(event);
         } catch (Exception e) {
             log.warn("emitChunk failed: {}", e.getMessage());
         }
     }
+
+    /** 协调器(由 DifyWorkflowExecutor 注入) */
+    public void setResponseCoordinator(ResponseStreamCoordinator coordinator) {
+        this.responseCoordinator = coordinator;
+    }
+
+    private ResponseStreamCoordinator responseCoordinator;
 
     // Extended methods for engine
 

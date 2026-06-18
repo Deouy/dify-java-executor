@@ -674,23 +674,42 @@ public final class WorkflowEvent {
         private final int messageId;
         private final String delta;
         private final int index;
+        /**
+         * chunk 的变量选择子。对齐 Dify Python 端 StreamChunkEvent.selector。
+         *
+         * <p>语义:
+         * <ul>
+         *   <li>原始 LLM chunk(从 LlmNode 直接 emit):selector=null,nodeId=llmId</li>
+         *   <li>经 ResponseStreamCoordinator 重写后的 answer chunk:nodeId=answerId,selector=[llmId, "text"]</li>
+         *   <li>answer 节点直接 emit 的文本 chunk(模板的 TextSegment):nodeId=answerId,selector=[answerId, "answer"]</li>
+         * </ul>
+         * 消费端用 selector 区分 chunk 来源;selector=null 视为原始 LLM 输出。
+         */
+        private final List<String> selector;
 
         public Chunk(String nodeId, int messageId, String delta, int index) {
+            this(nodeId, messageId, delta, index, null);
+        }
+
+        public Chunk(String nodeId, int messageId, String delta, int index, List<String> selector) {
             this.nodeId = nodeId;
             this.messageId = messageId;
             this.delta = delta;
             this.index = index;
+            this.selector = selector;
         }
 
         public String nodeId() { return nodeId; }
         public int messageId() { return messageId; }
         public String delta() { return delta; }
         public int index() { return index; }
+        public List<String> selector() { return selector; }
 
         public String getNodeId() { return nodeId; }
         public int getMessageId() { return messageId; }
         public String getDelta() { return delta; }
         public int getIndex() { return index; }
+        public List<String> getSelector() { return selector; }
 
         @Override
         public boolean equals(Object o) {
@@ -700,16 +719,17 @@ public final class WorkflowEvent {
             return messageId == that.messageId
                     && index == that.index
                     && Objects.equals(nodeId, that.nodeId)
-                    && Objects.equals(delta, that.delta);
+                    && Objects.equals(delta, that.delta)
+                    && Objects.equals(selector, that.selector);
         }
 
         @Override
-        public int hashCode() { return Objects.hash(nodeId, messageId, delta, index); }
+        public int hashCode() { return Objects.hash(nodeId, messageId, delta, index, selector); }
 
         @Override
         public String toString() {
-            return String.format("Chunk[nodeId=%s, messageId=%d, index=%d, delta=%s]",
-                    nodeId, messageId, index, delta);
+            return String.format("Chunk[nodeId=%s, messageId=%d, index=%d, delta=%s, selector=%s]",
+                    nodeId, messageId, index, delta, selector);
         }
     }
 }

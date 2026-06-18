@@ -1,5 +1,6 @@
 package com.dify.workflow.parser;
 
+import com.alibaba.fastjson2.JSONObject;
 import com.dify.workflow.model.DifyDslModel;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONWriter;
@@ -38,6 +39,7 @@ public class DifyYamlParser {
             log.debug("Parsing Dify YAML content");
             Map<String, Object> yamlMap = yaml.load(yamlContent);
             String jsonStr = JSON.toJSONString(yamlMap);
+            JSONObject obj = JSON.parseObject(jsonStr);
             DifyDslModel model = JSON.parseObject(jsonStr, DifyDslModel.class);
             mergeAdditionalProperties(model, jsonStr);
             validate(model);

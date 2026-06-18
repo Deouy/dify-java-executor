@@ -88,6 +88,53 @@ public class DifyWorkflowExecutor {
         }
     }
 
+    /**
+     * 计算从 answer 节点反向上溯到所有必经的 if-else 分支边 ID。
+     * 用于 ResponseStreamCoordinator 给 answer 会话建立"路径表",会话激活需要路径清零。
+     *
+     * <p>算法:BFS 从 answer 反向走,经过 if-else 节点时,把"该 if-else 走向当前分支"
+     * 的那条 case 边收集起来(其他 case 边不在本 answer 的路径上)。</p>
+     *
+     * @param answerNodeId answer 节点 ID
+     * @return answer 节点阻塞的 case 边 ID 列表;若无 if-else 上游,返回空列表
+     */
+    private List<String> computePathEdges(String answerNodeId) {
+        List<String> result = new ArrayList<>();
+        if (answerNodeId == null) return result;
+
+        // BFS 用 Set 避免循环
+        Set<String> visited = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(answerNodeId);
+        visited.add(answerNodeId);
+
+        while (!queue.isEmpty()) {
+            String nodeId = queue.poll();
+            List<DifyEdge> incoming = targetEdgesMap.get(nodeId);
+            if (incoming == null) continue;
+
+            for (DifyEdge edge : incoming) {
+                String source = edge.source();
+                if (source == null || visited.contains(source)) continue;
+                visited.add(source);
+
+                // 看 source 节点是不是 if-else 类型
+                DifyNode sourceNode = dslModel.workflow().graph().nodes().stream()
+                        .filter(n -> source.equals(n.id()))
+                        .findFirst().orElse(null);
+                if (sourceNode != null && sourceNode.data() != null
+                        && "if-else".equals(sourceNode.data().type())) {
+                    // 这是一条 if-else 走向当前 answer 路径的 case 边,加入阻塞集
+                    if (edge.id() != null) {
+                        result.add(edge.id());
+                    }
+                }
+                queue.add(source);
+            }
+        }
+        return result;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -124,6 +171,10 @@ public class DifyWorkflowExecutor {
         context.setSubGraphRunner(this::executeSubGraph);
         // 注入 eventListener,供 LLM/Agent 流式 chunk 透传
         context.setEventListener(eventListener);
+        // 注入 ResponseStreamCoordinator(关键修复:让 emitChunk 走协调器重写而非直发)
+        context.setResponseCoordinator(responseCoordinator);
+        responseCoordinator.setEventListener(eventListener);
+        responseCoordinator.setChunkMessageId(context.getChunkMessageId());
         // 注入聊天历史存储和会话ID
         if (historyStore != null) {
             context.setHistoryStore(historyStore);
@@ -159,6 +210,23 @@ public class DifyWorkflowExecutor {
 
             // 注册所有 response 节点 (answer/end) 到流式协调器
             responseCoordinator.registerAll(context.getNodes());
+
+            // 关键修复:为每个 type=answer 节点创建 AnswerSession,
+            // 模板解析 + 路径表(从上游 LLM 到本 answer 之间的所有 if-else 分支边)
+            for (DifyNode node : context.getNodes()) {
+                String type = node.data() != null ? node.data().type() : null;
+                if ("answer".equals(type)) {
+                    String template = node.data() != null ? node.data().answer() : null;
+                    List<String> pathEdges = computePathEdges(node.id());
+                    responseCoordinator.registerAnswerNode(node.id(), template,
+                            variableResolver, pathEdges);
+                } else if ("end".equals(type)) {
+                    // EndNode 占位(本次不实现,仅留接口)
+                    Object outputs = node.data() != null ? node.data().outputs() : null;
+                    List<?> outputsList = (outputs instanceof List) ? (List<?>) outputs : java.util.Collections.emptyList();
+                    responseCoordinator.registerEndNode(node.id(), outputsList, variableResolver);
+                }
+            }
 
             // Initialize start node variables from inputs
             initializeStartNode(context, startNode, inputs);
@@ -413,6 +481,12 @@ public class DifyWorkflowExecutor {
                 executeNodeInternal(activated, context, records, subGraphNodeIds, subVisited);
             }
 
+            // 关键修复:若是 LLM 节点,通知协调器 flush 该 LLM chunk buffer
+            // (对应 Dify 原版 LLM 节点完成 → coordinator 刷出 buffer 到下游 answer)
+            if (node != null && node.data() != null && "llm".equals(node.data().type())) {
+                responseCoordinator.onLlmNodeCompleted(nodeId);
+            }
+
         } catch (Exception e) {
             long endTime = System.currentTimeMillis();
             log.error("Node execution failed: {} - {}", nodeId, e.getMessage(), e);
@@ -486,6 +560,8 @@ public class DifyWorkflowExecutor {
                     continue;
                 }
             }
+            // 关键修复:通知协调器该边被取走,用于路径表清零门控 answer 会话激活
+            responseCoordinator.onEdgeTaken(edge.id());
             executeNodeInternal(edge.target(), context, records, subGraphNodeIds, subVisited);
         }
     }

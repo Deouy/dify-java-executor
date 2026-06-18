@@ -1,10 +1,12 @@
 package com.dify.workflow.parser;
 
+import com.dify.workflow.model.TemplateSegment;
 import com.dify.workflow.model.node.SystemVariable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -93,6 +95,62 @@ public class VariableResolver {
             refs.add(parseVariableRef(fullMatch));
         }
         return refs;
+    }
+
+    /**
+     * 把模板字符串拆成 [TextSegment, VariableSegment, TextSegment, ...] 的有序列表。
+     *
+     * <p>对齐 Dify Python 端 {@code graph_engine.template.Template.from_answer_template}。
+     * 用于 ResponseStreamCoordinator 把 answer 节点的 answer 字段解析成可逐 chunk 重写的段序列。</p>
+     *
+     * <p>解析规则:
+     * <ul>
+     *   <li>{{#nodeId.field#}} → VariableSegment(selector=[nodeId, field])</li>
+     *   <li>其他字面字符 → TextSegment(原样)</li>
+     *   <li>空字符串或 null → 返回空 list</li>
+     *   <li>无 {{#...#}} 的纯文本 → 返回单 TextSegment</li>
+     * </ul>
+     *
+     * @param template 模板字符串(如 "{{#llm.text#}}\n\n{{#llm.sources#}}")
+     * @return 按出现顺序的段列表
+     */
+    public List<TemplateSegment> parseTemplate(String template) {
+        List<TemplateSegment> segments = new ArrayList<>();
+        if (template == null || template.isEmpty()) {
+            return segments;
+        }
+
+        Matcher matcher = VARIABLE_PATTERN.matcher(template);
+        int cursor = 0;
+        while (matcher.find()) {
+            int refStart = matcher.start();
+            int refEnd = matcher.end();
+
+            // refStart 之前是字面文本
+            if (refStart > cursor) {
+                segments.add(new TemplateSegment.TextSegment(template.substring(cursor, refStart)));
+            }
+
+            // ref 区间是变量段,selector = [nodeId, field]
+            String fullMatch = matcher.group(1);
+            String[] parts = fullMatch.split("\\.", 2);
+            if (parts.length == 2) {
+                segments.add(new TemplateSegment.VariableSegment(
+                        Arrays.asList(parts[0], parts[1])));
+            } else {
+                // 退化处理:不是 nodeId.field 形式,按字面文本处理
+                segments.add(new TemplateSegment.TextSegment(matcher.group()));
+            }
+
+            cursor = refEnd;
+        }
+
+        // 尾部剩余字面文本
+        if (cursor < template.length()) {
+            segments.add(new TemplateSegment.TextSegment(template.substring(cursor)));
+        }
+
+        return segments;
     }
 
     /**
