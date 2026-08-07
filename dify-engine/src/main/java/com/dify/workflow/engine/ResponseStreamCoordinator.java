@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  *   if-else 走完分支
  *     → coordinator.onEdgeTaken(edge.id)
- *     → 移除所有 session.blockingEdgeIds
+ *     → 移除该边在各 session 所有 paths 中的引用;任一 path 清空即激活
  *     → 路径清零的 session.active=true
  *     → flushSessions() 真正刷出 buffered chunks,标签重写为 answerId
  * </pre>
@@ -192,26 +192,37 @@ public class ResponseStreamCoordinator {
      * @param answerNodeId answer 节点 ID
      * @param answerTemplate answer 节点的 answer 模板字符串
      * @param resolver 用于解析模板中的 {{#...#}} 引用
-     * @param pathEdgeIds 从上游 LLM 到本 answer 之间所有分支边的 ID 列表;
-     *                     空列表表示 LLM 直接上游(无 if-else 路由)
+     * @param paths 从 root 到本 answer 的所有可能路径,每条路径是"必须被取走的分支边 ID"列表;
+     *              若所有路径都为空列表(直接上游无 if-else),session 立即激活
      */
     public void registerAnswerNode(String answerNodeId, String answerTemplate,
-                                   VariableResolver resolver, List<String> pathEdgeIds) {
+                                   VariableResolver resolver, List<List<String>> paths) {
         if (answerNodeId == null) return;
 
         List<TemplateSegment> template = (answerTemplate == null || answerTemplate.isEmpty())
                 ? Collections.emptyList()
                 : resolver.parseTemplate(answerTemplate);
 
-        Set<String> blocking = (pathEdgeIds == null)
-                ? Collections.emptySet()
-                : new HashSet<>(pathEdgeIds);
+        List<List<String>> sessionPaths = (paths == null)
+                ? Collections.emptyList()
+                : new ArrayList<>(paths);
 
-        boolean active = blocking.isEmpty();  // 无分支边则立即激活
-        AnswerSession session = new AnswerSession(answerNodeId, template, blocking, active);
+        // 激活条件(对齐 Dify):存在至少一条路径其所有阻塞边都已清空。
+        // 这里 paths 已预先过滤好(每条只包含 if-else 分支边),
+        //   故"立即可达"意味着至少有一条 path 是空列表。
+        boolean active = false;
+        for (List<String> p : sessionPaths) {
+            if (p.isEmpty()) {
+                active = true;
+                break;
+            }
+        }
+        AnswerSession session = new AnswerSession(answerNodeId, template, sessionPaths, active);
         sessions.put(answerNodeId, session);
-        log.debug("Registered answer session: id={}, templateSegments={}, blockingEdges={}, active={}",
-                answerNodeId, template.size(), blocking.size(), active);
+        log.debug("Registered answer session: id={}, templateSegments={}, numPaths={}, pathLengths={}, active={}",
+                answerNodeId, template.size(), sessionPaths.size(),
+                sessionPaths.stream().map(List::size).collect(java.util.stream.Collectors.toList()),
+                active);
     }
 
     /**
@@ -243,23 +254,23 @@ public class ResponseStreamCoordinator {
     }
 
     /**
-     * 边被取走(executor 边筛选通过后调用)。从所有 session.blockingEdgeIds 移除,
-     * 若某 session 路径清零则标记 active,随后刷出。
+     * 边被取走(executor 边筛选通过后调用)。
+     *
+     * <p>对齐 Dify 原版 {@code ResponseStreamCoordinator.on_edge_taken}:
+     * 从所有 session 的每条 path 中移除该边;任一 path 清空则激活该 session 并刷出 chunks。</p>
      */
     public void onEdgeTaken(String edgeId) {
         if (edgeId == null) return;
 
         for (AnswerSession session : sessions.values()) {
-            if (session.blockingEdgeIds.remove(edgeId)) {
-                log.debug("Edge taken {} removed from session {} blocking; remaining={}",
-                        edgeId, session.answerNodeId, session.blockingEdgeIds.size());
+            if (session.active) {
+                continue;  // 已激活的 session 不用再处理
             }
-        }
-        // 任何 session 路径清零后变 active(如果还不在 active)→ 标 active
-        for (AnswerSession session : sessions.values()) {
-            if (!session.active && session.blockingEdgeIds.isEmpty()) {
+            boolean anyPathCleared = session.removeEdge(edgeId);
+            if (anyPathCleared) {
                 session.active = true;
-                log.debug("Answer session {} activated (path cleared)", session.answerNodeId);
+                log.debug("Edge taken {} cleared a path → session {} activated",
+                        edgeId, session.answerNodeId);
             }
         }
         flushSessions();
@@ -267,7 +278,7 @@ public class ResponseStreamCoordinator {
 
     /**
      * LLM 节点完成(executor 节点 doExecute 返回后,仅 LLM 类型时调用)。
-     * 用于直接上游场景(中间 直接回复),blockingEdgeIds 本就为空,active==true。
+     * 用于直接上游场景(中间 直接回复),paths 中每条都为空列表,active==true。
      * 同时清空对应 selector 的 chunkBuffer(LLM 已 stream 完,buffer 使命完成)。
      */
     public void onLlmNodeCompleted(String llmNodeId) {
@@ -357,21 +368,50 @@ public class ResponseStreamCoordinator {
 
     /**
      * answer 会话(对应 Dify 的 ResponseSession)。
-     * 包含模板段、阻塞边集、激活状态、chunk 缓存。
+     * 包含模板段、阻塞路径集合、激活状态、chunk 缓存。
+     *
+     * <p>关键设计(对齐 Dify 原版 {@code graphon.graph_engine.response_coordinator.coordinator._build_paths_map}):</p>
+     * <ul>
+     *   <li>阻塞追踪按 <b>路径</b>(path)追踪,不是按 <b>边集</b>。</li>
+     *   <li>对每个 answer,预先算出从 root 到该 answer 的所有可能路径(正向 find_paths)。</li>
+     *   <li>每条路径上,如果边的源节点是 if-else / container / response 等"会拦截下游"的类型,则把该边纳入路径的阻塞集。</li>
+     *   <li>session 激活条件: <b>存在至少一条路径其所有阻塞边都被清空</b>(即该路径上每个 if-else 都已决策)。</li>
+     *   <li>多分支汇合(同一 if-else 多条 case 边汇合到同一下游)也能正确工作:
+     *       每条路径只包含一条 case 边,所以任一 case 被走,对应路径就清空,session 即激活。</li>
+     * </ul>
      */
     static final class AnswerSession {
         final String answerNodeId;
         final List<TemplateSegment> template;
-        final Set<String> blockingEdgeIds;
+        /**
+         * 阻塞路径列表。每条路径是一个有序的分支边 ID 列表,
+         * 当某条路径的边全部被 onEdgeTaken 清空时,session 可激活。
+         */
+        final List<List<String>> paths;
         final Map<List<String>, Deque<String>> chunkBuffer = new ConcurrentHashMap<>();
         volatile boolean active;
 
         AnswerSession(String answerNodeId, List<TemplateSegment> template,
-                      Set<String> blockingEdgeIds, boolean active) {
+                      List<List<String>> paths, boolean active) {
             this.answerNodeId = answerNodeId;
             this.template = template;
-            this.blockingEdgeIds = new HashSet<>(blockingEdgeIds);
+            this.paths = paths == null ? java.util.Collections.emptyList()
+                    : new java.util.ArrayList<>(paths);
             this.active = active;
+        }
+
+        /**
+         * 当一条边被取走时,从所有路径中移除该边;若任一路径清空则返回 true(可激活)。
+         */
+        boolean removeEdge(String edgeId) {
+            boolean anyPathCleared = false;
+            for (List<String> path : paths) {
+                path.remove(edgeId);
+                if (path.isEmpty()) {
+                    anyPathCleared = true;
+                }
+            }
+            return anyPathCleared;
         }
 
         /**

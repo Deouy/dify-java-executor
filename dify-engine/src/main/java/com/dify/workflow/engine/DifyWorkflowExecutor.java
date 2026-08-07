@@ -89,50 +89,94 @@ public class DifyWorkflowExecutor {
     }
 
     /**
-     * 计算从 answer 节点反向上溯到所有必经的 if-else 分支边 ID。
-     * 用于 ResponseStreamCoordinator 给 answer 会话建立"路径表",会话激活需要路径清零。
+     * 计算从 start (root) 到 answer 的所有完整路径,每条路径单独收集 if-else 分支边。
      *
-     * <p>算法:BFS 从 answer 反向走,经过 if-else 节点时,把"该 if-else 走向当前分支"
-     * 的那条 case 边收集起来(其他 case 边不在本 answer 的路径上)。</p>
+     * <p>对齐 Dify 原版 {@code graphon.graph_engine.response_coordinator.coordinator._build_paths_map}:</p>
+     * <ul>
+     *   <li><b>正向</b> find_paths(root → answer) 枚举所有完整路径(每条路径上每条边只出现一次,
+     *       多分支汇合的拓扑会产出多条路径)。</li>
+     *   <li>对每条路径,过滤:边的源节点是 if-else / container / response 等"分支/拦截"类型时,
+     *       把该边保留到路径的阻塞集中。</li>
+     *   <li>返回的 list 中,每个 inner list 表示一条路径;运行中只要任一路径的所有边都被取走,
+     *       该 answer 的流式 chunk 即开始发出(对齐 Dify 的"任一路径清空即激活")。</li>
+     * </ul>
      *
      * @param answerNodeId answer 节点 ID
-     * @return answer 节点阻塞的 case 边 ID 列表;若无 if-else 上游,返回空列表
+     * @return 从 start 到 answer 的所有路径,每条路径包含"必须被取走的分支边 ID"列表
      */
-    private List<String> computePathEdges(String answerNodeId) {
-        List<String> result = new ArrayList<>();
-        if (answerNodeId == null) return result;
+    private List<List<String>> computePathEdges(String answerNodeId) {
+        List<List<String>> allPaths = new ArrayList<>();
+        if (answerNodeId == null) return allPaths;
 
-        // BFS 用 Set 避免循环
-        Set<String> visited = new HashSet<>();
-        Deque<String> queue = new ArrayDeque<>();
-        queue.add(answerNodeId);
-        visited.add(answerNodeId);
+        DifyNode startNode = dslModel.workflow().graph().nodes().stream()
+                .filter(n -> "start".equals(n.data() != null ? n.data().type() : null))
+                .findFirst().orElse(null);
+        if (startNode == null) {
+            log.warn("No start node found; cannot compute paths for answer {}", answerNodeId);
+            return allPaths;
+        }
 
-        while (!queue.isEmpty()) {
-            String nodeId = queue.poll();
-            List<DifyEdge> incoming = targetEdgesMap.get(nodeId);
-            if (incoming == null) continue;
+        // 正向 find_paths:枚举所有从 start 到 answer 的完整路径
+        findAllPaths(startNode.id(), answerNodeId, new ArrayList<>(), new HashSet<>(), allPaths);
 
-            for (DifyEdge edge : incoming) {
-                String source = edge.source();
-                if (source == null || visited.contains(source)) continue;
-                visited.add(source);
-
-                // 看 source 节点是不是 if-else 类型
+        // 对每条路径,过滤出"分支/拦截"边
+        List<List<String>> filteredPaths = new ArrayList<>();
+        for (List<String> path : allPaths) {
+            List<String> blocking = new ArrayList<>();
+            for (String edgeId : path) {
+                DifyEdge edge = findEdgeById(edgeId);
+                if (edge == null) continue;
                 DifyNode sourceNode = dslModel.workflow().graph().nodes().stream()
-                        .filter(n -> source.equals(n.id()))
+                        .filter(n -> edge.source().equals(n.id()))
                         .findFirst().orElse(null);
                 if (sourceNode != null && sourceNode.data() != null
-                        && "if-else".equals(sourceNode.data().type())) {
-                    // 这是一条 if-else 走向当前 answer 路径的 case 边,加入阻塞集
-                    if (edge.id() != null) {
-                        result.add(edge.id());
-                    }
+                        && ("if-else".equals(sourceNode.data().type())
+                            || "container".equals(sourceNode.data().type()))) {
+                    blocking.add(edgeId);
                 }
-                queue.add(source);
+            }
+            filteredPaths.add(blocking);
+        }
+        return filteredPaths;
+    }
+
+    /** 正向 DFS 枚举所有从 currentNodeId 到 targetNodeId 的完整路径(边 ID 序列) */
+    private void findAllPaths(String currentNodeId, String targetNodeId,
+                              List<String> currentPath, Set<String> visitedNodes,
+                              List<List<String>> result) {
+        if (currentNodeId.equals(targetNodeId)) {
+            result.add(new ArrayList<>(currentPath));
+            return;
+        }
+        visitedNodes.add(currentNodeId);
+        List<DifyEdge> outgoing = sourceEdgesMap.get(currentNodeId);
+        if (outgoing != null) {
+            for (DifyEdge edge : outgoing) {
+                String next = edge.target();
+                if (next == null || visitedNodes.contains(next)) continue;
+                if (edge.id() != null) {
+                    currentPath.add(edge.id());
+                }
+                findAllPaths(next, targetNodeId, currentPath, visitedNodes, result);
+                if (!currentPath.isEmpty()) {
+                    currentPath.remove(currentPath.size() - 1);
+                }
             }
         }
-        return result;
+        visitedNodes.remove(currentNodeId);
+    }
+
+    /** 按 edge.id() 查找 edge */
+    private DifyEdge findEdgeById(String edgeId) {
+        if (edgeId == null) return null;
+        for (List<DifyEdge> edges : sourceEdgesMap.values()) {
+            for (DifyEdge edge : edges) {
+                if (edgeId.equals(edge.id())) {
+                    return edge;
+                }
+            }
+        }
+        return null;
     }
 
     public static Builder builder() {
@@ -212,14 +256,14 @@ public class DifyWorkflowExecutor {
             responseCoordinator.registerAll(context.getNodes());
 
             // 关键修复:为每个 type=answer 节点创建 AnswerSession,
-            // 模板解析 + 路径表(从上游 LLM 到本 answer 之间的所有 if-else 分支边)
+            // 模板解析 + 多路径表(从 start 到本 answer 的所有路径,每条含必经 if-else 分支边)
             for (DifyNode node : context.getNodes()) {
                 String type = node.data() != null ? node.data().type() : null;
                 if ("answer".equals(type)) {
                     String template = node.data() != null ? node.data().answer() : null;
-                    List<String> pathEdges = computePathEdges(node.id());
+                    List<List<String>> paths = computePathEdges(node.id());
                     responseCoordinator.registerAnswerNode(node.id(), template,
-                            variableResolver, pathEdges);
+                            variableResolver, paths);
                 } else if ("end".equals(type)) {
                     // EndNode 占位(本次不实现,仅留接口)
                     Object outputs = node.data() != null ? node.data().outputs() : null;
