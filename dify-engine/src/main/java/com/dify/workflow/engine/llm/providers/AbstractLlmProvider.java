@@ -182,6 +182,8 @@ public abstract class AbstractLlmProvider {
                     }
                     String content = delta.getString("content");
                     if (content != null) {
+                        // 诊断日志(2026-08-07):打印 SSE 事件到达时间戳和内容,用于对比 onChunk 时间戳
+                        // System.err.println("[DIAG-SSE] t=" + System.currentTimeMillis() + " idx=" + idx[0] + " content=\"" + content + "\"");
                         onDelta.accept(new StreamDelta(content, idx[0]++, null));
                     }
                 } catch (Exception e) {

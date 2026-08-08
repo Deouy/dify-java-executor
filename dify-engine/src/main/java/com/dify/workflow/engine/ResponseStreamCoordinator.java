@@ -356,6 +356,8 @@ public class ResponseStreamCoordinator {
         WorkflowEvent.Chunk event = new WorkflowEvent.Chunk(
                 answerNodeId, chunkMessageId, delta, idx, selector);
         try {
+            // 诊断日志(2026-08-07):打印 coordinator 实际 emit 时间戳,用于与 SSE 时间戳对比
+            // System.err.println("[DIAG-EMIT] t=" + System.currentTimeMillis() + " idx=" + idx + " delta=\"" + delta + "\"");
             eventListener.onChunk(event);
         } catch (Exception e) {
             log.warn("Coordinator emitChunk failed: {}", e.getMessage());
