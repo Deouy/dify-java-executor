@@ -11,6 +11,11 @@ import com.dify.workflow.model.LlmCallResult;
 import com.dify.workflow.model.LlmService;
 import com.dify.workflow.model.NodeExecutionContext;
 import com.dify.workflow.model.node.NodeType;
+import com.dify.workflow.nodes.thinking.DeltaEmitter;
+import com.dify.workflow.nodes.thinking.ProviderExtraParamsBuilder;
+import com.dify.workflow.nodes.thinking.ProviderExtraParamsBuilderFactory;
+import com.dify.workflow.nodes.thinking.ThinkingContentStrategy;
+import com.dify.workflow.nodes.thinking.ThinkingStrategyFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -143,11 +148,30 @@ public class LlmNode extends AbstractDifyNode {
         // 结构化输出：通过 extraParameters 传 response_format={"type":"json_object"}
         // OpenAI/DeepSeek 等支持该参数，会强制 LLM 输出合法 JSON
         // 用 Map 而非 String，让 AbstractLlmProvider 把 response_format 保留为 JSON object 嵌套
+        Map<String, Object> extra = new HashMap<>();
         if (soEnabled) {
-            Map<String, Object> extra = new HashMap<>();
             Map<String, String> responseFormat = new HashMap<>();
             responseFormat.put("type", "json_object");
             extra.put("response_format", responseFormat);
+        }
+
+        // 关键修复(2026-08-07):把 YAML 中 model.completion_params.thinking 透传到 LLM API。
+        //   对齐 Dify graphon LLMNode._invoke_llm() 的 thinking 字段传递逻辑。
+        // 关键重构(2026-08-16):用 ProviderExtraParamsBuilder 按 provider 转换 thinking 参数。
+        //   - DeepSeek:thinking={type:"enabled"} + reasoning_effort(顶层字段)
+        //   - vLLM:extra_body.chat_template_kwargs.{enable_thinking, reasoning_effort}
+        //   - 其它:thinking 字段透传
+        // 思考内容的流式处理由 ThinkingContentStrategy 完成(每个 provider 各自的策略)
+        ProviderExtraParamsBuilder paramsBuilder =
+                ProviderExtraParamsBuilderFactory.create(provider);
+        Map<String, Object> thinkingExtra = paramsBuilder.buildThinkingExtraParams(
+                model.completionParams());
+        if (!thinkingExtra.isEmpty()) {
+            for (Map.Entry<String, Object> entry : thinkingExtra.entrySet()) {
+                extra.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if (!extra.isEmpty()) {
             requestBuilder.extraParameters(extra);
         }
 
@@ -209,23 +233,57 @@ public class LlmNode extends AbstractDifyNode {
         if (request.stream()) {
             // 流式:累积所有 delta,在 stream 结束后构造 LlmCallResult
             StringBuilder accumulated = new StringBuilder();
+            StringBuilder reasonAccumulated = new StringBuilder();
             StringBuilder toolCallsJson = new StringBuilder("[");
             int promptTokens = 0, completionTokens = 0, totalTokens = 0;
             String finishReason = "stop";
+
+            // 关键重构(2026-08-16):用策略模式处理思考内容。
+            //   - YAML 未配 reasoning_format 或值非 "separated" → MergedThinkTagStrategy
+            //     (think 标签拦截,所有内容当正文输出)
+            //   - reasoning_format=separated + provider=deepseek → DeepSeekSeparatedStrategy
+            //     (用 API 原生 reasoning_content 字段直接分离)
+            //   - reasoning_format=separated + 其它 provider → TagBasedSeparatedStrategy
+            //     (用 ThinkTagParser 分离,后续追加 vLLM 专属策略)
+            String reasoningFormat = null;
+            if (data.additionalProperties() != null) {
+                Object rf = data.additionalProperties().get("reasoning_format");
+                if (rf != null) reasoningFormat = rf.toString();
+            }
+            final ThinkingContentStrategy thinkingStrategy =
+                    ThinkingStrategyFactory.create(provider, reasoningFormat);
+
+            // DeltaEmitter:把策略输出路由到 context.emitChunk 并累积到 result/processData
+            final DeltaEmitter emitter = new DeltaEmitter() {
+                @Override
+                public void emitText(String text) {
+                    accumulated.append(text);
+                    context.emitChunk(id, text);
+                }
+                @Override
+                public void emitReasonContent(String text) {
+                    reasonAccumulated.append(text);
+                    context.emitChunk(id, text,
+                            java.util.Arrays.asList(id, "reason_content"));
+                }
+            };
+
             try {
                 llmService.callStream(provider, modelName, request, delta -> {
-                    if (delta.content() != null) {
-                        accumulated.append(delta.content());
-                        // 关键:每个 token 透传给 WorkflowEventListener.onChunk
-                        context.emitChunk(id, delta.content());
-                    }
+                    thinkingStrategy.onDelta(delta, emitter);
                 });
+                // 流结束:策略 flush(防止 ThinkTagParser 残留 buffer)
+                thinkingStrategy.flush(emitter);
             } catch (Exception e) {
                 throw new RuntimeException("LLM stream call failed: " + e.getMessage(), e);
             }
             // 流完成后构造 LlmCallResult(当前简化版,toolCalls/usage 暂不带)
             result = new LlmCallResult(accumulated.toString(), modelName, null, null, null,
                     finishReason, true, null, null, null);
+            // 若有 reason_content 累积,暂存到 processData(后续可扩展为 outputs.reason_content 字段)
+            if (reasonAccumulated.length() > 0) {
+                pd.put("reason_content", reasonAccumulated.toString());
+            }
         } else {
             // 同步路径(原行为)
             result = llmService.call(provider, modelName, request);

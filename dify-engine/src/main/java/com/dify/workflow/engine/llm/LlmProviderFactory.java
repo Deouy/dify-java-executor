@@ -79,6 +79,22 @@ public class LlmProviderFactory implements LlmService {
     }
 
     /**
+     * 注册 provider 的 streamExecutor(流式调用)。
+     * 用于测试或自定义 provider,在工厂创建后动态注册额外流式 executor。
+     *
+     * <p>说明:LlmProviderFactory.Builder.streamExecutor(...) 只在 build() 之前生效。
+     * 工厂创建后,若还想追加流式 executor(如测试需要 mock 一个 vLLM provider),
+     * 可调此方法。callStream 路径会优先从 streamExecutors 查找,找不到再 fallback。</p>
+     *
+     * @param name Provider name
+     * @param executor 流式 executor,参数 (request, onDelta)
+     */
+    public void registerStreamExecutor(String name,
+                                        java.util.function.BiConsumer<ChatRequest, Consumer<StreamDelta>> executor) {
+        streamExecutors.put(name, executor);
+    }
+
+    /**
      * 解析提供商名称。
      * marketplace 格式: "langgenius/deepseek/deepseek" → 尝试最后一段 "deepseek"
      * 简单格式: "deepseek" → 直接匹配

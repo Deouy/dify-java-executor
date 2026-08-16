@@ -268,19 +268,38 @@ public class DifyWorkflowContext implements NodeExecutionContext {
      */
     @Override
     public void emitChunk(String nodeId, String delta) {
+        // 默认调用不带 selector 的版本
+        emitChunk(nodeId, delta, null);
+    }
+
+    /**
+     * 带 selector 的 chunk 发射。
+     *
+     * <p>selector 不为 null 时(比如 [llmId, "reason_content"]),原样透传到 WorkflowEvent.Chunk,
+     * 不走协调器重写(协调器只负责把 [llmId, "text"] 重写为 [answerId, "text"])。</p>
+     */
+    @Override
+    public void emitChunk(String nodeId, String delta, java.util.List<String> selector) {
         if (eventListener == null) {
             return;  // listener 不关心流式 chunk,默认丢弃
+        }
+        // reason_content 等非默认 selector 直接透传给 listener,不走协调器
+        // (下游 {{#llm.reason_content#}} 模板变量需要原始 selector 才能在 LlmNode 内部消费)
+        if (selector != null && responseCoordinator != null) {
+            // 协调器目前只重写 [llmId, "text"] → [answerId, "text"];其他 selector 直接发
+            responseCoordinator.interceptChunk(nodeId, delta, selector);
+            return;
         }
         if (responseCoordinator != null) {
             // 走协调器重写路径;协调器内部按 answer 节点 ID 重新 emit
             responseCoordinator.interceptChunk(nodeId, delta);
             return;
         }
-        // 后备通道(无协调器):原样发,selector=null 表示原始 LLM chunk
+        // 后备通道(无协调器):原样发
         try {
             int idx = chunkIndex++;
             com.dify.workflow.model.WorkflowEvent.Chunk event =
-                    new com.dify.workflow.model.WorkflowEvent.Chunk(nodeId, chunkMessageId, delta, idx, null);
+                    new com.dify.workflow.model.WorkflowEvent.Chunk(nodeId, chunkMessageId, delta, idx, selector);
             eventListener.onChunk(event);
         } catch (Exception e) {
             log.warn("emitChunk failed: {}", e.getMessage());

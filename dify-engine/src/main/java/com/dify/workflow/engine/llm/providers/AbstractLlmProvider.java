@@ -180,11 +180,14 @@ public abstract class AbstractLlmProvider {
                     if (delta == null) {
                         return;
                     }
+                    // 关键修复(2026-08-16):同时提取 content 和 reasoning_content。
+                    //   DeepSeek V4-Flash / R1 等思考模型在 SSE delta 中
+                    //   {"content":"正文...","reasoning_content":"思考..."} 同时返回,
+                    //   两者独立递增。原代码只读 content,会丢思维链。
                     String content = delta.getString("content");
-                    if (content != null) {
-                        // 诊断日志(2026-08-07):打印 SSE 事件到达时间戳和内容,用于对比 onChunk 时间戳
-                        // System.err.println("[DIAG-SSE] t=" + System.currentTimeMillis() + " idx=" + idx[0] + " content=\"" + content + "\"");
-                        onDelta.accept(new StreamDelta(content, idx[0]++, null));
+                    String reasoningContent = delta.getString("reasoning_content");
+                    if (content != null || reasoningContent != null) {
+                        onDelta.accept(new StreamDelta(content, idx[0]++, null, reasoningContent));
                     }
                 } catch (Exception e) {
                     log.warn("Failed to parse SSE chunk: data={}, err={}", data, e.getMessage());
@@ -199,8 +202,25 @@ public abstract class AbstractLlmProvider {
 
             @Override
             public void onFailure(EventSource eventSource, Throwable t, Response response) {
-                String errMsg = t != null ? t.getMessage()
-                        : (response != null ? "HTTP " + response.code() : "unknown error");
+                String errMsg;
+                String responseBody = "";
+                if (t != null) {
+                    errMsg = t.getMessage();
+                } else if (response != null) {
+                    errMsg = "HTTP " + response.code();
+                    // 关键修复:读取响应体,DeepSeek 400 错误通常带具体原因(JSON),
+                    //   原代码只输出 HTTP code 会丢失调试信息(2026-08-16)。
+                    try {
+                        if (response.body() != null) {
+                            responseBody = response.body().string();
+                            errMsg = errMsg + " | body=" + responseBody;
+                        }
+                    } catch (Exception readErr) {
+                        log.warn("Failed to read error response body: {}", readErr.getMessage());
+                    }
+                } else {
+                    errMsg = "unknown error";
+                }
                 log.error("SSE stream failure: {}", errMsg);
                 onDelta.accept(new StreamDelta(null, idx[0]++, "error:" + errMsg));
                 failure[0] = (t instanceof IOException) ? (IOException) t
@@ -286,6 +306,7 @@ public abstract class AbstractLlmProvider {
         // 添加额外参数
         // 字符串值直接传递；Map/List 值转成 JSONObject/JSONArray 以保留 JSON 嵌套结构
         // （如 OpenAI 的 response_format={"type":"json_object"} 需要传 Map 而非 String）
+        // Boolean/Number 值原样透传(JSONObject.put 会自动序列化)
         if (request.extraParameters() != null) {
             for (Map.Entry<String, Object> entry : request.extraParameters().entrySet()) {
                 Object value = entry.getValue();
@@ -293,9 +314,10 @@ public abstract class AbstractLlmProvider {
                     value = new JSONObject((Map) value);
                 } else if (value instanceof List) {
                     value = new JSONArray((List) value);
-                } else {
-                    value = value.toString();
                 }
+                // Boolean/Number/String 都直接 put(JSONObject 会正确序列化)
+                // 注意:value.toString() 会把 boolean 转成 "true"/"false" 字符串,
+                //   对 OpenAI 的 thinking 等 boolean 参数是错的。关键修复(2026-08-07)。
                 builder.put(entry.getKey(), value);
             }
         }

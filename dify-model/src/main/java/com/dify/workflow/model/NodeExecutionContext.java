@@ -160,4 +160,18 @@ public interface NodeExecutionContext {
     default void emitChunk(String nodeId, String delta) {
         // 默认空实现:listener 不关心流式 chunk
     }
+
+    /**
+     * 带 selector 的 chunk 发射重载。
+     * 用于区分同一节点的不同变量(如 [llmId, "text"] vs [llmId, "reason_content"])。
+     * 对齐 Dify graphon StreamChunkEvent.selector 语义。
+     *
+     * @param nodeId 触发流式输出的节点 ID
+     * @param delta 单次增量文本
+     * @param selector 变量选择子(标识 chunk 属于哪个变量)
+     */
+    default void emitChunk(String nodeId, String delta, java.util.List<String> selector) {
+        // 默认实现回退到无 selector 版本
+        emitChunk(nodeId, delta);
+    }
 }

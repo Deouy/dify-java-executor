@@ -239,7 +239,41 @@ public class ResponseStreamCoordinator {
      * 把 chunk 塞进所有引用了 [llmNodeId, "text"] 的 session.chunkBuffer,然后尝试刷出。
      */
     public void interceptChunk(String llmNodeId, String delta) {
+        // 默认行为:把 chunk 当作 LLM 主输出([llmNodeId, "text"])
+        interceptChunk(llmNodeId, delta, java.util.Arrays.asList(llmNodeId, "text"));
+    }
+
+    /**
+     * 带 selector 的拦截重载(2026-08-07):支持 reason_content 等非默认 selector。
+     *
+     * <p>当前实现:
+     * <ul>
+     *   <li>[llmNodeId, "text"]  → 走原本逻辑(buffer 到 answer session)</li>
+     *   <li>其他 selector(如 [llmNodeId, "reason_content"]) → 直接 emit 给 listener(不 buffer,不等 answer)</li>
+     * </ul>
+     * </p>
+     */
+    public void interceptChunk(String llmNodeId, String delta, java.util.List<String> selector) {
         if (delta == null || delta.isEmpty()) return;
+        if (selector == null) {
+            selector = java.util.Arrays.asList(llmNodeId, "text");
+        }
+
+        // reason_content 等非 text selector 直接透传给 listener(不走 answer session 重写)
+        boolean isTextSelector = selector.size() == 2 && llmNodeId.equals(selector.get(0))
+                && "text".equals(selector.get(1));
+        if (!isTextSelector) {
+            // 透传:用 llmNodeId 作为 nodeId,保留 selector
+            int idx = chunkIndexSeq.getAndIncrement();
+            WorkflowEvent.Chunk event = new WorkflowEvent.Chunk(
+                    llmNodeId, chunkMessageId, delta, idx, selector);
+            try {
+                if (eventListener != null) eventListener.onChunk(event);
+            } catch (Exception e) {
+                log.warn("Coordinator direct emitChunk failed: {}", e.getMessage());
+            }
+            return;
+        }
 
         boolean buffered = false;
         for (AnswerSession session : sessions.values()) {
