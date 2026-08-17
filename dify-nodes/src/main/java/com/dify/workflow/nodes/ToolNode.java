@@ -73,9 +73,15 @@ public class ToolNode extends AbstractDifyNode {
         String type = paramMap.get("type") != null ? paramMap.get("type").toString() : null;
         Object value = paramMap.get("value");
 
+        if(value != null){
+            value = resolveVariables(context, value.toString());
+        }
+
         if ("constant".equals(type)) {
             return value;
         } else if ("variable".equals(type)) {
+            return resolveVariableReference(value, context);
+        }else if ("mixed".equals(type)) {
             return resolveVariableReference(value, context);
         }
 
