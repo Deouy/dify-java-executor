@@ -232,10 +232,10 @@ public abstract class AbstractLlmProvider {
         EventSource es = EventSources.createFactory(httpClient).newEventSource(httpRequest, listener);
         try {
             // 阻塞等流结束(转异步为同步)
-            boolean finished = latch.await(5, TimeUnit.MINUTES);
+            boolean finished = latch.await(10, TimeUnit.MINUTES);
             if (!finished) {
                 es.cancel();
-                throw new IOException("SSE stream timeout after 5 minutes");
+                throw new IOException("SSE stream timeout after 10 minutes");
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
