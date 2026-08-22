@@ -17,7 +17,7 @@ import java.util.Map;
  *       <td>{@code reasoning_effort: "max"}</td><td>请求体顶层</td></tr>
  *   <tr><td>vLLM</td><td>{@code enable_thinking: true}</td>
  *       <td>{@code reasoning_effort: "high"}</td>
- *       <td>嵌套在 {@code extra_body.chat_template_kwargs}</td></tr>
+ *       <td>请求体顶层 {@code chat_template_kwargs}</td></tr>
  *   <tr><td>OpenAI o1</td><td>(顶层 reasoning_effort)</td>
  *       <td>{@code reasoning_effort: "high"}</td><td>请求体顶层</td></tr>
  * </table>
@@ -32,7 +32,7 @@ public interface ProviderExtraParamsBuilder {
      * @param completionParams YAML {@code model.completion_params} 完整 Map
      *        (可能含 {@code thinking}、{@code reasoning_effort}、
      *         {@code temperature} 等字段,本接口只关心思考相关字段)
-     * @return 构造好的 extra params(将作为请求体字段或 nested extra_body 发送)
+     * @return 构造好的 extra params(将作为请求体顶层字段发送)
      */
     Map<String, Object> buildThinkingExtraParams(Map<String, Object> completionParams);
 

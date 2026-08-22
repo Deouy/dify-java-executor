@@ -38,11 +38,11 @@ public class DeepSeekExtraParamsBuilder implements ProviderExtraParamsBuilder {
             return result;
         }
 
-        // 1. 思考开关:thinking=true → thinking: {type: "enabled"}
-        //                 thinking=false → thinking: {type: "disabled"}
+        // 1. 思考开关:thinking=true/"true" → thinking: {type: "enabled"}
+        //                 thinking=false/"false" → thinking: {type: "disabled"}
         //                 未配置 → 不传(用 API 默认:auto)
         Object thinkingVal = completionParams.get("thinking");
-        if (Boolean.TRUE.equals(thinkingVal)) {
+        if (isThinkingEnabled(thinkingVal)) {
             Map<String, Object> thinkingOpts = new HashMap<>();
             thinkingOpts.put("type", "enabled");
             // 可选:budget_tokens 控制推理 token 上限
@@ -51,7 +51,7 @@ public class DeepSeekExtraParamsBuilder implements ProviderExtraParamsBuilder {
                 thinkingOpts.put("budget_tokens", budget);
             }
             result.put("thinking", thinkingOpts);
-        } else if (Boolean.FALSE.equals(thinkingVal)) {
+        } else if (isThinkingDisabled(thinkingVal)) {
             Map<String, Object> thinkingOpts = new HashMap<>();
             thinkingOpts.put("type", "disabled");
             result.put("thinking", thinkingOpts);
@@ -64,5 +64,27 @@ public class DeepSeekExtraParamsBuilder implements ProviderExtraParamsBuilder {
         }
 
         return result;
+    }
+
+    /** 兼容 Boolean.TRUE 与字符串 "true"(忽略大小写)。 */
+    static boolean isThinkingEnabled(Object thinkingVal) {
+        if (Boolean.TRUE.equals(thinkingVal)) {
+            return true;
+        }
+        if (thinkingVal instanceof String) {
+            return "true".equalsIgnoreCase(((String) thinkingVal).trim());
+        }
+        return false;
+    }
+
+    /** 兼容 Boolean.FALSE 与字符串 "false"(忽略大小写)。 */
+    static boolean isThinkingDisabled(Object thinkingVal) {
+        if (Boolean.FALSE.equals(thinkingVal)) {
+            return true;
+        }
+        if (thinkingVal instanceof String) {
+            return "false".equalsIgnoreCase(((String) thinkingVal).trim());
+        }
+        return false;
     }
 }

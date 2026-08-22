@@ -44,7 +44,7 @@ public final class ThinkingStrategyFactory {
             return new DeepSeekSeparatedStrategy();
         }
         if (p.contains("vllm")) {
-            // vLLM 用 <think>...</think> 标签包裹思考内容,无原生 reasoning_content 字段
+            // vLLM 用独立 reasoning 字段或 <think>...</think> 标签包裹思考内容
             return new VllmStrategy();
         }
 

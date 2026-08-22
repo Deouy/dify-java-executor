@@ -85,7 +85,7 @@ public abstract class AbstractLlmProvider {
                     .post(RequestBody.create(JSON_MEDIA_TYPE, requestBody.toJSONString()))
                     .headers(headers)
                     .build();
-
+            log.info("LLM request apiUrl: {}", apiUrl);
             // 4. 发送请求并解析响应
             try (Response response = httpClient.newCall(httpRequest).execute()) {
                 String responseBody = response.body() != null ? response.body().string() : "";
@@ -180,12 +180,15 @@ public abstract class AbstractLlmProvider {
                     if (delta == null) {
                         return;
                     }
-                    // 关键修复(2026-08-16):同时提取 content 和 reasoning_content。
-                    //   DeepSeek V4-Flash / R1 等思考模型在 SSE delta 中
-                    //   {"content":"正文...","reasoning_content":"思考..."} 同时返回,
+                    // 关键修复(2026-08-16):同时提取 content 和推理字段。
+                    //   DeepSeek: delta.reasoning_content
+                    //   vLLM 0.22+: delta.reasoning
                     //   两者独立递增。原代码只读 content,会丢思维链。
                     String content = delta.getString("content");
                     String reasoningContent = delta.getString("reasoning_content");
+                    if (reasoningContent == null || reasoningContent.isEmpty()) {
+                        reasoningContent = delta.getString("reasoning");
+                    }
                     if (content != null || reasoningContent != null) {
                         onDelta.accept(new StreamDelta(content, idx[0]++, null, reasoningContent));
                     }
@@ -387,6 +390,12 @@ public abstract class AbstractLlmProvider {
             // 提取内容
             String content = message.getString("content");
 
+            // 提取思维链:DeepSeek 用 reasoning_content,vLLM 0.22+ 用 reasoning
+            String reasoningContent = message.getString("reasoning_content");
+            if (reasoningContent == null || reasoningContent.isEmpty()) {
+                reasoningContent = message.getString("reasoning");
+            }
+
             // 提取 tool_calls
             List<ChatRequest.ToolCall> toolCalls = null;
             List<ChatRequest.Message> assistantMessages = new java.util.ArrayList<>();
@@ -433,7 +442,8 @@ public abstract class AbstractLlmProvider {
                 finishReason = firstChoice.getString("finish_reason");
             }
 
-            return new LlmCallResult(content, null, promptTokens, completionTokens, totalTokens, finishReason, true, null, toolCalls, assistantMessages);
+            return new LlmCallResult(content, null, promptTokens, completionTokens, totalTokens,
+                    finishReason, true, null, toolCalls, assistantMessages, reasoningContent);
 
         } catch (Exception e) {
             log.error("Failed to parse response", e);

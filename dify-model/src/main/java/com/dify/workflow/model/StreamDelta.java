@@ -14,7 +14,8 @@ import java.util.Objects;
  *   <li><b>reasoningContent</b> — DeepSeek-R1/V4-Flash 等思考模型的思维链内容。
  *       DeepSeek API 在 SSE delta 中同时返回
  *       {@code {"delta": {"content": "...", "reasoning_content": "..."}}},
- *       两者会独立递增。该字段为 null 时表示本 chunk 没有思维链增量。</li>
+ *       vLLM 0.22+ 使用 {@code {"delta": {"content": "...", "reasoning": "..."}}},
+ *       Provider 层统一映射到本字段。两者会独立递增。该字段为 null 时表示本 chunk 没有思维链增量。</li>
  * </ul>
  * </p>
  */

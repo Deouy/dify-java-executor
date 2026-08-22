@@ -6,17 +6,19 @@ import com.dify.workflow.nodes.ThinkTagParser;
 /**
  * vLLM 思考内容处理策略。
  *
- * <p>vLLM 把思考内容放在 {@code content} 字段里并用 {@code <think>...</think>} 标签包裹,
- * SSE 响应中通常没有独立的 {@code reasoning_content} 字段。
- * 所以本策略完全依赖 {@link ThinkTagParser} 解析 content。</p>
+ * <p>vLLM 0.22+ 在 SSE / 非流式响应中通过独立字段返回思维链
+ * ({@code delta.reasoning} 或 {@code message.reasoning}),由
+ * {@link com.dify.workflow.engine.llm.providers.AbstractLlmProvider}
+ * 映射到 {@link StreamDelta#reasoningContent()}。
+ * 旧版或未开独立推理字段时,也可能把思考放进 {@code content} 的
+ * {@code <think>...</think>} 标签里。</p>
  *
  * <p>行为:</p>
  * <ul>
- *   <li>解析 {@code content} 中的 <think>...</think> 标签</li>
- *   <li>标签内部 emit 到 {@code reason_content} selector</li>
- *   <li>标签外部 emit 到 {@code text} selector</li>
- *   <li>若 delta 带 {@code reasoning_content} 字段(部分 vLLM 代理可能扩展),
- *       优先 emit 到 {@code reason_content}</li>
+ *   <li>若 delta 带 {@code reasoningContent}(来自 API 的 {@code reasoning}
+ *       或 {@code reasoning_content}),优先 emit 到 {@code reason_content}</li>
+ *   <li>否则解析 {@code content} 中的 <think>...</think> 标签</li>
+ *   <li>标签内部 emit 到 {@code reason_content},标签外部 emit 到 {@code text}</li>
  * </ul>
  *
  * <p>适用条件:</p>
@@ -33,7 +35,7 @@ public class VllmStrategy implements ThinkingContentStrategy {
     public void onDelta(StreamDelta delta, DeltaEmitter emitter) {
         if (delta == null) return;
 
-        // 路径 1:vLLM 代理若额外提供 reasoning_content 字段,优先用之
+        // 路径 1:API 原生 reasoning / reasoning_content → StreamDelta.reasoningContent
         if (delta.reasoningContent() != null && !delta.reasoningContent().isEmpty()) {
             emitter.emitReasonContent(delta.reasoningContent());
         }
@@ -41,7 +43,7 @@ public class VllmStrategy implements ThinkingContentStrategy {
         // 路径 2:解析 content 中的 <think> 标签
         if (delta.content() != null && !delta.content().isEmpty()) {
             if (delta.reasoningContent() != null && !delta.reasoningContent().isEmpty()) {
-                // reasoning_content 已发,content 是纯文本,不再做标签解析(避免重复)
+                // reasoning 已发,content 是纯文本,不再做标签解析(避免重复)
                 emitter.emitText(delta.content());
             } else {
                 // 用 ThinkTagParser 拆 <think> 标签

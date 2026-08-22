@@ -159,13 +159,15 @@ public class LlmNode extends AbstractDifyNode {
         //   对齐 Dify graphon LLMNode._invoke_llm() 的 thinking 字段传递逻辑。
         // 关键重构(2026-08-16):用 ProviderExtraParamsBuilder 按 provider 转换 thinking 参数。
         //   - DeepSeek:thinking={type:"enabled"} + reasoning_effort(顶层字段)
-        //   - vLLM:extra_body.chat_template_kwargs.{enable_thinking, reasoning_effort}
+        //   - vLLM:chat_template_kwargs.{enable_thinking, reasoning_effort}(请求体顶层)
         //   - 其它:thinking 字段透传
         // 思考内容的流式处理由 ThinkingContentStrategy 完成(每个 provider 各自的策略)
         ProviderExtraParamsBuilder paramsBuilder =
                 ProviderExtraParamsBuilderFactory.create(provider);
         Map<String, Object> thinkingExtra = paramsBuilder.buildThinkingExtraParams(
                 model.completionParams());
+        log.info("LLM node model.completionParams {}", model.completionParams());
+
         if (!thinkingExtra.isEmpty()) {
             for (Map.Entry<String, Object> entry : thinkingExtra.entrySet()) {
                 extra.put(entry.getKey(), entry.getValue());
@@ -287,6 +289,11 @@ public class LlmNode extends AbstractDifyNode {
         } else {
             // 同步路径(原行为)
             result = llmService.call(provider, modelName, request);
+            // 非流式:vLLM message.reasoning / DeepSeek reasoning_content → reason_content
+            if (result.reasoningContent() != null && !result.reasoningContent().isEmpty()) {
+                pd.put("reason_content", result.reasoningContent());
+                context.setVariable(id, "reason_content", result.reasoningContent());
+            }
         }
 
         if (!result.isSuccess()) {

@@ -28,10 +28,24 @@ public final class LlmCallResult {
     private final List<ChatRequest.ToolCall> toolCalls;
     @JSONField(name = "assistant_messages")
     private final List<ChatRequest.Message> assistantMessages;
+    /**
+     * 思维链内容(DeepSeek {@code reasoning_content} / vLLM {@code reasoning})。
+     * 非流式响应解析时填充;流式路径通常经 StreamDelta 单独累积。
+     */
+    @JSONField(name = "reasoning_content")
+    private final String reasoningContent;
 
     public LlmCallResult(String content, String model, Integer promptTokens, Integer completionTokens,
                          Integer totalTokens, String finishReason, Boolean success, String errorMessage,
                          List<ChatRequest.ToolCall> toolCalls, List<ChatRequest.Message> assistantMessages) {
+        this(content, model, promptTokens, completionTokens, totalTokens, finishReason, success,
+                errorMessage, toolCalls, assistantMessages, null);
+    }
+
+    public LlmCallResult(String content, String model, Integer promptTokens, Integer completionTokens,
+                         Integer totalTokens, String finishReason, Boolean success, String errorMessage,
+                         List<ChatRequest.ToolCall> toolCalls, List<ChatRequest.Message> assistantMessages,
+                         String reasoningContent) {
         this.content = content;
         this.model = model;
         this.promptTokens = promptTokens;
@@ -42,6 +56,7 @@ public final class LlmCallResult {
         this.errorMessage = errorMessage;
         this.toolCalls = toolCalls;
         this.assistantMessages = assistantMessages;
+        this.reasoningContent = reasoningContent;
     }
 
     public String content() { return content; }
@@ -54,6 +69,7 @@ public final class LlmCallResult {
     public String errorMessage() { return errorMessage; }
     public List<ChatRequest.ToolCall> toolCalls() { return toolCalls; }
     public List<ChatRequest.Message> assistantMessages() { return assistantMessages; }
+    public String reasoningContent() { return reasoningContent; }
 
     public String getContent() { return content; }
     public String getModel() { return model; }
@@ -65,6 +81,7 @@ public final class LlmCallResult {
     public String getErrorMessage() { return errorMessage; }
     public List<ChatRequest.ToolCall> getToolCalls() { return toolCalls; }
     public List<ChatRequest.Message> getAssistantMessages() { return assistantMessages; }
+    public String getReasoningContent() { return reasoningContent; }
 
     public boolean isSuccess() { return success != null && success; }
 
@@ -95,18 +112,19 @@ public final class LlmCallResult {
                 && Objects.equals(success, that.success)
                 && Objects.equals(errorMessage, that.errorMessage)
                 && Objects.equals(toolCalls, that.toolCalls)
-                && Objects.equals(assistantMessages, that.assistantMessages);
+                && Objects.equals(assistantMessages, that.assistantMessages)
+                && Objects.equals(reasoningContent, that.reasoningContent);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(content, model, promptTokens, completionTokens, totalTokens,
-                finishReason, success, errorMessage, toolCalls, assistantMessages);
+                finishReason, success, errorMessage, toolCalls, assistantMessages, reasoningContent);
     }
 
     @Override
     public String toString() {
-        return String.format("LlmCallResult[content=%s, model=%s, promptTokens=%s, completionTokens=%s, totalTokens=%s, finishReason=%s, success=%s, errorMessage=%s, toolCalls=%s, assistantMessages=%s]",
-                content, model, promptTokens, completionTokens, totalTokens, finishReason, success, errorMessage, toolCalls, assistantMessages);
+        return String.format("LlmCallResult[content=%s, model=%s, promptTokens=%s, completionTokens=%s, totalTokens=%s, finishReason=%s, success=%s, errorMessage=%s, toolCalls=%s, assistantMessages=%s, reasoningContent=%s]",
+                content, model, promptTokens, completionTokens, totalTokens, finishReason, success, errorMessage, toolCalls, assistantMessages, reasoningContent);
     }
 }
